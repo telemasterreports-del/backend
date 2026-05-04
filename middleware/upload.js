@@ -1,16 +1,16 @@
-// middleware/upload.js
+
 const multer = require("multer");
-const path = require("path");
+const multerS3 = require("multer-s3");
+const s3 = require("../config/s3");
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/");
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + path.extname(file.originalname)); //keeps the format of the file
-  }
+const upload = multer({
+  storage: multerS3({
+    s3,
+    bucket: process.env.S3_BUCKET_NAME,
+    key: (req, file, cb) => {
+      cb(null, `uploads/${Date.now()}-${file.originalname}`);
+    }
+  })
 });
-
-const upload = multer({ storage });
 
 module.exports = upload;

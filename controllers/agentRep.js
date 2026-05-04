@@ -1,5 +1,18 @@
-const fs = require('fs');
-const csv = require('csv-parser');
+const csv = require("csv-parser");
+const s3 = require("../config/s3");
+
+// 🔹 Convert HH:MM:SS → seconds
+const parseTimeToSeconds = (time) => {
+  if (!time) return 0;
+
+  const parts = time.split(":").map(Number);
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+
+  return Number(time) || 0;
+};
 
 module.exports = async (req, res) => {
   try {
@@ -7,15 +20,15 @@ module.exports = async (req, res) => {
       return res.status(400).json({ message: "Both CDR and Agent files are required" });
     }
 
-    const cdrPath = req.files.cdrFile[0].path;
-    const agentPath = req.files.agentFile[0].path;
+    const cdrKey = req.files.cdrFile[0].key;
+    const agentKey = req.files.agentFile[0].key;
 
     const validNumbers = new Set();
     const agentSummary = {};
 
     // 🔹 Normalize phone
     const cleanPhone = (num) =>
-      num ? num.toString().replace(/\D/g, '').slice(-10) : null;
+      num ? num.toString().replace(/\D/g, "").slice(-10) : null;
 
     // 🔹 Normalize disposition
     const normalizeDisposition = (value) => {
@@ -50,31 +63,45 @@ module.exports = async (req, res) => {
       "Not Interested",
       "Auto Dispose",
       "Not Available",
-      "Wrong Number"
+      "Wrong Number",
     ];
+
+    // 🔥 S3 stream helper
+    const getS3Stream = (key) => {
+      return s3
+        .getObject({
+          Bucket: process.env.S3_BUCKET_NAME,
+          Key: key,
+        })
+        .createReadStream();
+    };
 
     // ✅ Step 1: Read CDR
     await new Promise((resolve, reject) => {
-      fs.createReadStream(cdrPath)
+      getS3Stream(cdrKey)
         .pipe(csv())
-        .on('data', (row) => {
+        .on("data", (row) => {
           const disposition = row["Dialer Disposition"];
-          const phone = cleanPhone(row["Dialed Number"]); 
-          const CallType = row["Call Type"];
+          const phone = cleanPhone(row["Dialed Number"]);
+          const callType = row["Call Type"];
 
-          if (disposition === "Answered By Agent" && phone && CallType === "OB") {
+          if (
+            disposition === "Answered By Agent" &&
+            phone &&
+            callType === "OB"
+          ) {
             validNumbers.add(phone);
           }
         })
-        .on('end', resolve)
-        .on('error', reject);
+        .on("end", resolve)
+        .on("error", reject);
     });
 
-    // ✅ Step 2: Read Agent File
+    // ✅ Step 2: Read Agent file
     await new Promise((resolve, reject) => {
-      fs.createReadStream(agentPath)
+      getS3Stream(agentKey)
         .pipe(csv())
-        .on('data', (row) => {
+        .on("data", (row) => {
           const phone = cleanPhone(row["Phone Number"]);
           const agent = row["Agent Name"]?.trim() || "Unknown Agent";
           const rawDisposition = row["Disposition"];
@@ -82,27 +109,54 @@ module.exports = async (req, res) => {
           if (phone && validNumbers.has(phone)) {
             const disposition = normalizeDisposition(rawDisposition);
 
-            if (!agentSummary[agent]) {
-              agentSummary[agent] = { total: 0 };
+            // 🔥 SAFE talk time parsing (handles column variations)
+            const talkTimeSec = parseTimeToSeconds(
+              row["Talk Time"] ||
+              row["TalkTime"] ||
+              row["Talk Duration"] ||
+              row["Duration"] ||
+              row["Call Duration"]
+            );
 
-              DISPOSITIONS.forEach(d => {
+            if (!agentSummary[agent]) {
+              agentSummary[agent] = {
+                total: 0,
+                talkTimeTotal: 0,
+                callCount: 0,
+              };
+
+              DISPOSITIONS.forEach((d) => {
                 agentSummary[agent][d] = 0;
               });
             }
 
             agentSummary[agent].total++;
             agentSummary[agent][disposition]++;
+
+            // 🔥 accumulate talk time
+            agentSummary[agent].talkTimeTotal += talkTimeSec;
+            agentSummary[agent].callCount += 1;
           }
         })
-        .on('end', resolve)
-        .on('error', reject);
+        .on("end", resolve)
+        .on("error", reject);
     });
 
-    // ✅ Final Response Format (your required format)
-    const response = Object.keys(agentSummary).map(agent => ({
-      agent,
-      ...agentSummary[agent]
-    }));
+    // ✅ Final response
+    const response = Object.keys(agentSummary).map((agent) => {
+      const data = agentSummary[agent];
+
+      const avgTalkTime =
+        data.callCount > 0
+          ? data.talkTimeTotal / data.callCount
+          : 0;
+
+      return {
+        agent,
+        ...data,
+        avgTalkTime, // seconds
+      };
+    });
 
     res.json(response);
 
