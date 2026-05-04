@@ -64,11 +64,11 @@ module.exports = (req, res) => {
     .on("data", (row) => {
       try {
         const phone = row.phone;
-        const callType = row["Call Type"];
+        // const callType = row["Call Type"];
 
         // ✅ FILTER CONDITIONS
         if (!isValidPhone(phone)) return;
-        if (callType !== "OB") return;
+        // if (callType !== "OB") return;
 
         const zone = getZone(phone);
 
