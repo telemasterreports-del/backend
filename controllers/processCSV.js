@@ -1,85 +1,92 @@
+const fs = require("fs");
 const csv = require("csv-parser");
 const { PassThrough } = require("stream");
 const s3 = require("../config/s3");
 const areaCodeMap = require("../utils/areaCodeMap.json");
 
+// =====================
+// HELPERS
+// =====================
+
+const cleanPhone = (phone) => {
+  if (!phone) return null;
+  const cleaned = phone.toString().replace(/\D/g, "");
+  return cleaned.length >= 10 ? cleaned.slice(-10) : null;
+};
+
+const isValidPhone = (phone) => {
+  const cleaned = cleanPhone(phone);
+  return !!cleaned;
+};
+
+const getZone = (phone) => {
+  const cleaned = cleanPhone(phone);
+  if (!cleaned) return "UNKNOWN";
+
+  const areaCode = cleaned.slice(0, 3);
+  return areaCodeMap[areaCode] || "UNKNOWN";
+};
+
+// =====================
+// WRITERS STORAGE
+// =====================
+const writers = {};
+const counts = {};
+
+// =====================
+// CREATE WRITER PER ZONE
+// =====================
+const createWriterIfNotExists = (zone) => {
+  if (writers[zone]) return;
+
+  const pass = new PassThrough();
+
+  const fileName = `${zone}_${Date.now()}.csv`;
+
+  writers[zone] = {
+    stream: pass,
+    fileName,
+    uploadPromise: s3
+      .upload({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: fileName,
+        Body: pass,
+        ContentType: "text/csv",
+      })
+      .promise(),
+  };
+
+  counts[zone] = 0;
+};
+
+// =====================
+// CONTROLLER
+// =====================
 module.exports = (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: "No file uploaded" });
   }
 
-  const writers = {};
-  const counts = {};
-
-  // 🔹 Clean + validate phone
-  const cleanPhone = (num) =>
-    num ? num.toString().replace(/\D/g, "") : null;
-
-  const isValidPhone = (num) => {
-    const cleaned = cleanPhone(num);
-    return cleaned && cleaned.length >= 10;
-  };
-
-  // 🔹 Get zone (NO UNKNOWN now)
-  const getZone = (phone) => {
-    const cleaned = cleanPhone(phone);
-    const areaCode = cleaned.slice(0, 3);
-    return areaCodeMap[areaCode]; // if not found → skip row
-  };
-
-  const createWriterIfNotExists = (zone, row) => {
-    if (!writers[zone]) {
-      const pass = new PassThrough();
-
-      const fileName = `outputs/${zone}-${Date.now()}.csv`;
-
-      const upload = s3.upload({
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: fileName,
-        Body: pass,
-        ContentType: "text/csv"
-      });
-
-      writers[zone] = {
-        stream: pass,
-        uploadPromise: upload.promise(),
-        fileName
-      };
-
-      counts[zone] = 0;
-
-      // write header
-      pass.write(Object.keys(row).join(",") + "\n");
-    }
-  };
-
-  // 🔥 Read from S3
-  const stream = s3.getObject({
-    Bucket: process.env.S3_BUCKET_NAME,
-    Key: req.file.key
-  }).createReadStream();
-
-  stream
+  fs.createReadStream(req.file.path)
     .pipe(csv())
     .on("data", (row) => {
       try {
-        const phone = row.phone;
-        // const callType = row["Call Type"];
+        const phone = row.phone || row.Phone || row["Phone Number"];
 
-        // ✅ FILTER CONDITIONS
         if (!isValidPhone(phone)) return;
-        // if (callType !== "OB") return;
 
         const zone = getZone(phone);
 
-        // ❌ Skip if no valid zone mapping
-        if (!zone) return;
+        if (!cleanPhone(phone)) {
+          createWriterIfNotExists("UNKNOWN");
+          writers["UNKNOWN"].stream.write(Object.values(row).join(",") + "\n");
+          counts["UNKNOWN"]++;
+          return;
+        }
 
-        createWriterIfNotExists(zone, row);
+        createWriterIfNotExists(zone);
 
-        writers[zone].stream.write(
-          Object.values(row).join(",") + "\n"
-        );
+        writers[zone].stream.write(Object.values(row).join(",") + "\n");
 
         counts[zone]++;
       } catch (err) {
@@ -88,9 +95,10 @@ module.exports = (req, res) => {
     })
     .on("end", async () => {
       try {
-        // close streams
+        // close all streams
         Object.values(writers).forEach(({ stream }) => stream.end());
 
+        // wait for uploads
         const files = await Promise.all(
           Object.entries(writers).map(async ([zone, writer]) => {
             const result = await writer.uploadPromise;
@@ -98,24 +106,30 @@ module.exports = (req, res) => {
             return {
               zone,
               fileName: writer.fileName,
-              url: result.Location
+              url: result.Location,
+              count: counts[zone] || 0,
             };
           })
         );
 
         res.json({
-          message: "Files split successfully",
+          message: "Files split successfully by timezone",
           summary: counts,
-          files
+          files,
         });
-
       } catch (err) {
         console.error(err);
-        res.status(500).json({ message: "Error finalizing uploads" });
+        res.status(500).json({
+          message: "Error finalizing uploads",
+          error: err.message,
+        });
       }
     })
     .on("error", (err) => {
       console.error(err);
-      res.status(500).json({ message: "Error reading CSV from S3" });
+      res.status(500).json({
+        message: "Error reading CSV file",
+        error: err.message,
+      });
     });
 };
