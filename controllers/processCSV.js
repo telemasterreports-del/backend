@@ -4,6 +4,28 @@ const s3 = require("../config/s3");
 const areaCodeMap = require("../utils/areaCodeMap.json");
 
 // =====================
+// FIXED OUTPUT HEADERS
+// =====================
+
+const OUTPUT_HEADERS = [
+  "phone",
+  "Name",
+  "Last Name",
+  "Company Name",
+  "Address",
+  "City",
+  "State",
+  "ZIP",
+  "Email",
+  "FileName",
+  "Comments",
+  "DOB",
+  "SSN",
+  "Country",
+  "Zone",
+];
+
+// =====================
 // HELPERS
 // =====================
 
@@ -38,40 +60,129 @@ const getZone = (phone) => {
   return areaCodeMap[areaCode] || "UNKNOWN";
 };
 
-// convert row to CSV line safely
-const convertRowToCSV = (row, headers) => {
-  return headers
-    .map((header) => {
-      const value = row[header];
+// =====================
+// FLEXIBLE FIELD FINDER
+// =====================
 
-      if (value === undefined || value === null) {
-        return '""';
-      }
+const findField = (row, possibleNames) => {
+  const keys = Object.keys(row);
 
-      const escaped = value
-        .toString()
-        .replace(/"/g, '""');
+  const foundKey = keys.find((key) => {
+    const lower = key.toLowerCase().trim();
 
-      return `"${escaped}"`;
-    })
-    .join(",");
-};
-
-// dynamic phone field detection
-const getPhoneFromRow = (row) => {
-  const phoneKey = Object.keys(row).find((key) => {
-    const lower = key.toLowerCase();
-
-    return (
-      lower.includes("phone") ||
-      lower.includes("mobile") ||
-      lower.includes("contact") ||
-      lower.includes("number") ||
-      lower.includes("cell")
+    return possibleNames.some((name) =>
+      lower.includes(name)
     );
   });
 
-  return phoneKey ? row[phoneKey] : null;
+  return foundKey ? row[foundKey] : "";
+};
+
+// =====================
+// MAP ANY CSV FORMAT
+// TO STANDARD FORMAT
+// =====================
+
+const mapRowToStandardFormat = (
+  row,
+  zone,
+  originalFileName
+) => {
+  const phone = findField(row, [
+    "phone",
+    "mobile",
+    "contact",
+    "cell",
+    "number",
+  ]);
+
+  return {
+    phone: cleanPhone(phone) || "",
+
+    Name: findField(row, [
+      "name",
+      "first",
+      "fname",
+    ]),
+
+    "Last Name": findField(row, [
+      "last",
+      "lname",
+      "surname",
+    ]),
+
+    "Company Name": findField(row, [
+      "company",
+      "business",
+    ]),
+
+    Address: findField(row, [
+      "address",
+      "street",
+    ]),
+
+    City: findField(row, ["city"]),
+
+    State: findField(row, [
+      "state",
+      "province",
+    ]),
+
+    ZIP: findField(row, [
+      "zip",
+      "postal",
+      "pincode",
+    ]),
+
+    Email: findField(row, [
+      "email",
+      "mail",
+    ]),
+
+    FileName: originalFileName || "",
+
+    Comments: findField(row, [
+      "comment",
+      "remarks",
+      "notes",
+    ]),
+
+    DOB: findField(row, [
+      "dob",
+      "birth",
+    ]),
+
+    SSN: findField(row, ["ssn"]),
+
+    Country: findField(row, [
+      "country",
+    ]),
+
+    Zone: zone,
+  };
+};
+
+// =====================
+// CONVERT ROW TO CSV
+// =====================
+
+const convertRowToCSV = (row) => {
+  return OUTPUT_HEADERS.map((header) => {
+    const value = row[header];
+
+    if (
+      value === undefined ||
+      value === null
+    ) {
+      return '""';
+    }
+
+    const escaped = value
+      .toString()
+      .replace(/"/g, '""');
+
+    return `"${escaped}"`;
+  }).join(",");
 };
 
 // =====================
@@ -80,13 +191,21 @@ const getPhoneFromRow = (row) => {
 
 module.exports = async (req, res) => {
   try {
-    console.log("🔥 TIMEZONE SPLIT STARTED");
+    console.log(
+      "🔥 TIMEZONE SPLIT STARTED"
+    );
 
-    // support multiple upload formats
+    // support all upload formats
     const fileKey =
       req.file?.key ||
       req.files?.file?.[0]?.key ||
       req.files?.cdrFile?.[0]?.key;
+
+    const originalFileName =
+      req.file?.originalname ||
+      req.files?.file?.[0]
+        ?.originalname ||
+      "uploaded.csv";
 
     if (!fileKey) {
       return res.status(400).json({
@@ -95,7 +214,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    console.log("📂 FILE KEY:", fileKey);
+    console.log("📂 FILE:", fileKey);
 
     // request-scoped storage
     const writers = {};
@@ -106,8 +225,7 @@ module.exports = async (req, res) => {
     // =====================
 
     const createWriterIfNotExists = (
-      zone,
-      headers
+      zone
     ) => {
       if (writers[zone]) {
         return;
@@ -117,8 +235,10 @@ module.exports = async (req, res) => {
 
       const fileName = `${zone}_${Date.now()}.csv`;
 
-      // write header
-      pass.write(headers.join(",") + "\n");
+      // write fixed headers
+      pass.write(
+        OUTPUT_HEADERS.join(",") + "\n"
+      );
 
       writers[zone] = {
         stream: pass,
@@ -126,7 +246,8 @@ module.exports = async (req, res) => {
 
         uploadPromise: s3
           .upload({
-            Bucket: process.env.S3_BUCKET_NAME,
+            Bucket:
+              process.env.S3_BUCKET_NAME,
             Key: fileName,
             Body: pass,
             ContentType: "text/csv",
@@ -136,7 +257,9 @@ module.exports = async (req, res) => {
 
       counts[zone] = 0;
 
-      console.log(`✅ Writer created for ${zone}`);
+      console.log(
+        `✅ Writer created for ${zone}`
+      );
     };
 
     // =====================
@@ -155,35 +278,45 @@ module.exports = async (req, res) => {
 
       .on("data", (row) => {
         try {
-          // auto detect phone column
-          const phone = getPhoneFromRow(row);
+          // detect phone dynamically
+          const phone = findField(row, [
+            "phone",
+            "mobile",
+            "contact",
+            "cell",
+            "number",
+          ]);
 
-          // skip invalid rows
+          // skip invalid phones
           if (!isValidPhone(phone)) {
             return;
           }
 
           const zone = getZone(phone);
 
-          const headers = Object.keys(row);
-
           createWriterIfNotExists(
-            zone,
-            headers
+            zone
           );
 
-          // write row
+          // standardize row
+          const formattedRow =
+            mapRowToStandardFormat(
+              row,
+              zone,
+              originalFileName
+            );
+
+          // write standardized row
           writers[zone].stream.write(
             convertRowToCSV(
-              row,
-              headers
+              formattedRow
             ) + "\n"
           );
 
           counts[zone]++;
         } catch (err) {
           console.error(
-            "❌ Row processing error:",
+            "❌ Row error:",
             err
           );
         }
@@ -195,7 +328,6 @@ module.exports = async (req, res) => {
             "✅ CSV PROCESSING FINISHED"
           );
 
-          // no valid data
           if (
             Object.keys(writers).length === 0
           ) {
@@ -206,7 +338,7 @@ module.exports = async (req, res) => {
             });
           }
 
-          // close all streams
+          // close streams
           Object.values(writers).forEach(
             ({ stream }) => {
               stream.end();
@@ -219,7 +351,6 @@ module.exports = async (req, res) => {
               async ([zone, writer]) => {
                 await writer.uploadPromise;
 
-                // generate signed download URL
                 const signedUrl =
                   s3.getSignedUrl(
                     "getObject",
@@ -228,7 +359,8 @@ module.exports = async (req, res) => {
                         process.env
                           .S3_BUCKET_NAME,
                       Key: writer.fileName,
-                      Expires: 60 * 60, // 1 hour
+                      Expires:
+                        60 * 60,
                     }
                   );
 
@@ -249,7 +381,8 @@ module.exports = async (req, res) => {
             message:
               "Files split successfully by timezone",
             summary: counts,
-            totalFiles: files.length,
+            totalFiles:
+              files.length,
             files,
           });
         } catch (err) {
@@ -288,7 +421,8 @@ module.exports = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Internal server error",
+      message:
+        "Internal server error",
       error: err.message,
     });
   }
