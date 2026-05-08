@@ -1,4 +1,3 @@
-const fs = require("fs");
 const csv = require("csv-parser");
 const { PassThrough } = require("stream");
 const s3 = require("../config/s3");
@@ -24,7 +23,7 @@ const isValidPhone = (phone) => {
   return !!cleanPhone(phone);
 };
 
-// detect timezone zone
+// detect timezone
 const getZone = (phone) => {
   const cleaned = cleanPhone(phone);
 
@@ -35,16 +34,20 @@ const getZone = (phone) => {
   return areaCodeMap[areaCode] || "UNKNOWN";
 };
 
-// convert object row → csv line
-const convertRowToCSV = (row) => {
-  return Object.values(row)
-    .map((value) => {
-      if (value === null || value === undefined) return "";
+// convert row to CSV line
+const convertRowToCSV = (row, headers) => {
+  return headers
+    .map((header) => {
+      const value = row[header];
 
-      // escape quotes
-      const escaped = value.toString().replace(/"/g, '""');
+      if (value === undefined || value === null) {
+        return '""';
+      }
 
-      // wrap in quotes
+      const escaped = value
+        .toString()
+        .replace(/"/g, '""');
+
       return `"${escaped}"`;
     })
     .join(",");
@@ -54,9 +57,16 @@ const convertRowToCSV = (row) => {
 // CONTROLLER
 // =====================
 
-module.exports = (req, res) => {
+module.exports = async (req, res) => {
   try {
-    if (!req.file) {
+    console.log("🔥 TIMEZONE SPLIT STARTED");
+
+    // support multiple upload styles
+    const fileKey =
+      req.file?.key ||
+      req.files?.file?.[0]?.key;
+
+    if (!fileKey) {
       return res.status(400).json({
         message: "No file uploaded",
       });
@@ -70,14 +80,17 @@ module.exports = (req, res) => {
     // CREATE WRITER
     // =====================
 
-    const createWriterIfNotExists = (zone, headers) => {
+    const createWriterIfNotExists = (
+      zone,
+      headers
+    ) => {
       if (writers[zone]) return;
 
       const pass = new PassThrough();
 
       const fileName = `${zone}_${Date.now()}.csv`;
 
-      // write csv header
+      // write CSV header
       pass.write(headers.join(",") + "\n");
 
       writers[zone] = {
@@ -86,7 +99,8 @@ module.exports = (req, res) => {
 
         uploadPromise: s3
           .upload({
-            Bucket: process.env.S3_BUCKET_NAME,
+            Bucket:
+              process.env.S3_BUCKET_NAME,
             Key: fileName,
             Body: pass,
             ContentType: "text/csv",
@@ -98,10 +112,17 @@ module.exports = (req, res) => {
     };
 
     // =====================
-    // READ CSV
+    // S3 STREAM
     // =====================
 
-    fs.createReadStream(req.file.path)
+    const stream = s3
+      .getObject({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: fileKey,
+      })
+      .createReadStream();
+
+    stream
       .pipe(csv())
 
       .on("data", (row) => {
@@ -118,32 +139,59 @@ module.exports = (req, res) => {
             row.contact ||
             row.Contact;
 
-          // skip invalid
-          if (!isValidPhone(phone)) return;
+          // skip invalid phone
+          if (!isValidPhone(phone)) {
+            return;
+          }
 
           const zone = getZone(phone);
 
           const headers = Object.keys(row);
 
-          createWriterIfNotExists(zone, headers);
+          createWriterIfNotExists(
+            zone,
+            headers
+          );
 
           // write row
           writers[zone].stream.write(
-            convertRowToCSV(row) + "\n"
+            convertRowToCSV(
+              row,
+              headers
+            ) + "\n"
           );
 
           counts[zone]++;
         } catch (err) {
-          console.error("Row processing error:", err);
+          console.error(
+            "Row processing error:",
+            err
+          );
         }
       })
 
       .on("end", async () => {
         try {
+          console.log(
+            "✅ CSV PROCESSING FINISHED"
+          );
+
+          // no valid rows
+          if (
+            Object.keys(writers).length === 0
+          ) {
+            return res.status(400).json({
+              message:
+                "No valid phone numbers found",
+            });
+          }
+
           // close streams
-          Object.values(writers).forEach(({ stream }) => {
-            stream.end();
-          });
+          Object.values(writers).forEach(
+            ({ stream }) => {
+              stream.end();
+            }
+          );
 
           // wait uploads
           const files = await Promise.all(
@@ -154,52 +202,56 @@ module.exports = (req, res) => {
 
                 return {
                   zone,
-                  fileName: writer.fileName,
+                  fileName:
+                    writer.fileName,
                   url: result.Location,
-                  count: counts[zone] || 0,
+                  count:
+                    counts[zone] || 0,
                 };
               }
             )
           );
 
-          // cleanup uploaded temp file
-          if (fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-          }
-
           return res.json({
             success: true,
             message:
-              "Files split successfully by timezone",
+              "Files split successfully",
             summary: counts,
-            totalFiles: files.length,
             files,
           });
         } catch (err) {
-          console.error("Finalization error:", err);
+          console.error(
+            "Finalization error:",
+            err
+          );
 
           return res.status(500).json({
-            success: false,
-            message: "Error finalizing uploads",
+            message:
+              "Error finalizing uploads",
             error: err.message,
           });
         }
       })
 
       .on("error", (err) => {
-        console.error("CSV Read Error:", err);
+        console.error(
+          "CSV stream error:",
+          err
+        );
 
         return res.status(500).json({
-          success: false,
-          message: "Error reading CSV file",
+          message:
+            "Error reading CSV from S3",
           error: err.message,
         });
       });
   } catch (err) {
-    console.error("Controller Error:", err);
+    console.error(
+      "Controller Error:",
+      err
+    );
 
     return res.status(500).json({
-      success: false,
       message: "Internal server error",
       error: err.message,
     });
