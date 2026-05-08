@@ -13,7 +13,9 @@ const cleanPhone = (phone) => {
 
   const cleaned = phone.toString().replace(/\D/g, "");
 
-  if (cleaned.length < 10) return null;
+  if (cleaned.length < 10) {
+    return null;
+  }
 
   return cleaned.slice(-10);
 };
@@ -27,14 +29,16 @@ const isValidPhone = (phone) => {
 const getZone = (phone) => {
   const cleaned = cleanPhone(phone);
 
-  if (!cleaned) return "UNKNOWN";
+  if (!cleaned) {
+    return "UNKNOWN";
+  }
 
   const areaCode = cleaned.slice(0, 3);
 
   return areaCodeMap[areaCode] || "UNKNOWN";
 };
 
-// convert row to CSV line
+// convert row to CSV line safely
 const convertRowToCSV = (row, headers) => {
   return headers
     .map((header) => {
@@ -53,6 +57,23 @@ const convertRowToCSV = (row, headers) => {
     .join(",");
 };
 
+// dynamic phone field detection
+const getPhoneFromRow = (row) => {
+  const phoneKey = Object.keys(row).find((key) => {
+    const lower = key.toLowerCase();
+
+    return (
+      lower.includes("phone") ||
+      lower.includes("mobile") ||
+      lower.includes("contact") ||
+      lower.includes("number") ||
+      lower.includes("cell")
+    );
+  });
+
+  return phoneKey ? row[phoneKey] : null;
+};
+
 // =====================
 // CONTROLLER
 // =====================
@@ -61,16 +82,20 @@ module.exports = async (req, res) => {
   try {
     console.log("🔥 TIMEZONE SPLIT STARTED");
 
-    // support multiple upload styles
+    // support multiple upload formats
     const fileKey =
       req.file?.key ||
-      req.files?.file?.[0]?.key;
+      req.files?.file?.[0]?.key ||
+      req.files?.cdrFile?.[0]?.key;
 
     if (!fileKey) {
       return res.status(400).json({
+        success: false,
         message: "No file uploaded",
       });
     }
+
+    console.log("📂 FILE KEY:", fileKey);
 
     // request-scoped storage
     const writers = {};
@@ -84,13 +109,15 @@ module.exports = async (req, res) => {
       zone,
       headers
     ) => {
-      if (writers[zone]) return;
+      if (writers[zone]) {
+        return;
+      }
 
       const pass = new PassThrough();
 
       const fileName = `${zone}_${Date.now()}.csv`;
 
-      // write CSV header
+      // write header
       pass.write(headers.join(",") + "\n");
 
       writers[zone] = {
@@ -99,8 +126,7 @@ module.exports = async (req, res) => {
 
         uploadPromise: s3
           .upload({
-            Bucket:
-              process.env.S3_BUCKET_NAME,
+            Bucket: process.env.S3_BUCKET_NAME,
             Key: fileName,
             Body: pass,
             ContentType: "text/csv",
@@ -109,10 +135,12 @@ module.exports = async (req, res) => {
       };
 
       counts[zone] = 0;
+
+      console.log(`✅ Writer created for ${zone}`);
     };
 
     // =====================
-    // S3 STREAM
+    // READ CSV FROM S3
     // =====================
 
     const stream = s3
@@ -127,19 +155,10 @@ module.exports = async (req, res) => {
 
       .on("data", (row) => {
         try {
-          // flexible phone mapping
-          const phone =
-            row.phone ||
-            row.Phone ||
-            row["Phone Number"] ||
-            row.mobile ||
-            row.Mobile ||
-            row.number ||
-            row.Number ||
-            row.contact ||
-            row.Contact;
+          // auto detect phone column
+          const phone = getPhoneFromRow(row);
 
-          // skip invalid phone
+          // skip invalid rows
           if (!isValidPhone(phone)) {
             return;
           }
@@ -164,7 +183,7 @@ module.exports = async (req, res) => {
           counts[zone]++;
         } catch (err) {
           console.error(
-            "Row processing error:",
+            "❌ Row processing error:",
             err
           );
         }
@@ -176,35 +195,48 @@ module.exports = async (req, res) => {
             "✅ CSV PROCESSING FINISHED"
           );
 
-          // no valid rows
+          // no valid data
           if (
             Object.keys(writers).length === 0
           ) {
             return res.status(400).json({
+              success: false,
               message:
                 "No valid phone numbers found",
             });
           }
 
-          // close streams
+          // close all streams
           Object.values(writers).forEach(
             ({ stream }) => {
               stream.end();
             }
           );
 
-          // wait uploads
+          // wait for uploads
           const files = await Promise.all(
             Object.entries(writers).map(
               async ([zone, writer]) => {
-                const result =
-                  await writer.uploadPromise;
+                await writer.uploadPromise;
+
+                // generate signed download URL
+                const signedUrl =
+                  s3.getSignedUrl(
+                    "getObject",
+                    {
+                      Bucket:
+                        process.env
+                          .S3_BUCKET_NAME,
+                      Key: writer.fileName,
+                      Expires: 60 * 60, // 1 hour
+                    }
+                  );
 
                 return {
                   zone,
                   fileName:
                     writer.fileName,
-                  url: result.Location,
+                  url: signedUrl,
                   count:
                     counts[zone] || 0,
                 };
@@ -215,17 +247,19 @@ module.exports = async (req, res) => {
           return res.json({
             success: true,
             message:
-              "Files split successfully",
+              "Files split successfully by timezone",
             summary: counts,
+            totalFiles: files.length,
             files,
           });
         } catch (err) {
           console.error(
-            "Finalization error:",
+            "❌ Finalization error:",
             err
           );
 
           return res.status(500).json({
+            success: false,
             message:
               "Error finalizing uploads",
             error: err.message,
@@ -235,11 +269,12 @@ module.exports = async (req, res) => {
 
       .on("error", (err) => {
         console.error(
-          "CSV stream error:",
+          "❌ CSV stream error:",
           err
         );
 
         return res.status(500).json({
+          success: false,
           message:
             "Error reading CSV from S3",
           error: err.message,
@@ -247,11 +282,12 @@ module.exports = async (req, res) => {
       });
   } catch (err) {
     console.error(
-      "Controller Error:",
+      "❌ Controller Error:",
       err
     );
 
     return res.status(500).json({
+      success: false,
       message: "Internal server error",
       error: err.message,
     });
