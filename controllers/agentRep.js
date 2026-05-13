@@ -148,17 +148,34 @@ module.exports = async (req, res) => {
     const response = Object.keys(agentSummary).map((agent) => {
       const data = agentSummary[agent];
 
+      // add disposition percentages
+      const dispositionPercentages = {};
+
+      DISPOSITIONS.forEach((d) => {
+        dispositionPercentages[`${d}Percentage`] =
+          data.total > 0
+            ? Number(((data[d] / data.total) * 100).toFixed(2))
+            : 0;
+      });
+
       return {
         agent,
         ...data,
+        ...dispositionPercentages,
+
         avgTalkTime:
-          data.callCount > 0 ? data.talkTimeTotal / data.callCount : 0,
+          data.callCount > 0
+            ? Number(
+                (data.talkTimeTotal / data.callCount).toFixed(2)
+              )
+            : 0,
       };
     });
 
     res.json(response);
   } catch (error) {
     console.error("ERROR:", error);
+
     res.status(500).json({
       message: "Server error",
       error: error.message,
