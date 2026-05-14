@@ -1,43 +1,18 @@
 const csv = require("csv-parser");
 const s3 = require("../config/s3");
 
-// 🔹 Convert HH:MM:SS → seconds
-const parseTimeToSeconds = (time) => {
-  if (!time) return 0;
-
-  const parts = time
-    .split(":")
-    .map(Number);
-
-  if (parts.length === 3) {
-    return (
-      parts[0] * 3600 +
-      parts[1] * 60 +
-      parts[2]
-    );
-  }
-
-  return Number(time) || 0;
-};
-
-// 🔹 Normalize phone number
-const cleanPhone = (num) =>
-  num
-    ? num
-        .toString()
-        .replace(/\D/g, "")
-        .slice(-10)
-    : null;
-
-// 🔹 Normalize disposition
+// ====================================
+// Normalize Disposition
+// ====================================
 const normalizeDisposition = (
   value
 ) => {
   if (
     !value ||
     value.trim() === ""
-  )
+  ) {
     return "Blank";
+  }
 
   const v = value
     .toLowerCase()
@@ -79,6 +54,9 @@ const normalizeDisposition = (
   return "Blank";
 };
 
+// ====================================
+// Supported Dispositions
+// ====================================
 const DISPOSITIONS = [
   "Ringing",
   "Hungup",
@@ -94,8 +72,12 @@ const DISPOSITIONS = [
   "Wrong Number",
 ];
 
-// 🔹 S3 stream helper
-const getS3Stream = (key) => {
+// ====================================
+// S3 Stream Helper
+// ====================================
+const getS3Stream = (
+  key
+) => {
   return s3
     .getObject({
       Bucket:
@@ -106,175 +88,143 @@ const getS3Stream = (key) => {
     .createReadStream();
 };
 
+// ====================================
+// Controller
+// ====================================
 module.exports = async (
   req,
   res
 ) => {
   try {
+    // =========================
+    // Validate File
+    // =========================
     if (
-      !req.files?.cdrFile ||
       !req.files?.agentFile
     ) {
       return res.status(400).json({
         message:
-          "Both CDR and Agent files are required",
+          "Disposition file is required",
       });
     }
 
-    const cdrKey =
-      req.files.cdrFile[0].key;
-
     const agentKey =
-      req.files.agentFile[0].key;
+      req.files.agentFile[0]
+        .key;
 
-    const validNumbers =
-      new Set();
-
-    const agentSummary = {};
-
-    // =========================
-    // STEP 1: PROCESS CDR FILE
-    // =========================
-    await new Promise(
-      (resolve, reject) => {
-        getS3Stream(cdrKey)
-          .pipe(csv())
-          .on("data", (row) => {
-            const disposition =
-              row[
-                "Dialer Disposition"
-              ];
-
-            const phone =
-              cleanPhone(
-                row[
-                  "Dialed Number"
-                ]
-              );
-
-            const callType =
-              row["Call Type"];
-
-            if (
-              disposition ===
-                "Answered By Agent" &&
-              phone &&
-              callType === "OB"
-            ) {
-              validNumbers.add(
-                phone
-              );
-            }
-          })
-          .on("end", resolve)
-          .on("error", reject);
-      }
-    );
+    const agentSummary =
+      {};
 
     // =========================
-    // STEP 2: PROCESS AGENT FILE
+    // Process File
     // =========================
     await new Promise(
-      (resolve, reject) => {
-        getS3Stream(agentKey)
+      (
+        resolve,
+        reject
+      ) => {
+        getS3Stream(
+          agentKey
+        )
           .pipe(csv())
-          .on("data", (row) => {
-            const phone =
-              cleanPhone(
-                row[
-                  "Phone Number"
-                ]
-              );
+          .on(
+            "data",
+            (row) => {
+              try {
+                const agent =
+                  row[
+                    "Agent Name"
+                  ]?.trim() ||
+                  "Unknown Agent";
 
-            const agent =
-              row[
-                "Agent Name"
-              ]?.trim() ||
-              "Unknown Agent";
+                const rawDisposition =
+                  row[
+                    "Disposition"
+                  ];
 
-            const rawDisposition =
-              row[
-                "Disposition"
-              ];
+                const callType =
+                  row[
+                    "Call Type"
+                  ]?.trim();
 
-            const talkTimeSec =
-              parseTimeToSeconds(
-                row["Talk Time"]
-              );
+                // Only outbound calls
+                if (
+                  callType !==
+                  "OB"
+                ) {
+                  return;
+                }
 
-            if (
-              !phone ||
-              !validNumbers.has(
-                phone
-              )
-            )
-              return;
+                const disposition =
+                  normalizeDisposition(
+                    rawDisposition
+                  );
 
-            const disposition =
-              normalizeDisposition(
-                rawDisposition
-              );
-
-            // initialize agent bucket
-            if (
-              !agentSummary[
-                agent
-              ]
-            ) {
-              agentSummary[
-                agent
-              ] = {
-                total: 0,
-                talkTimeTotal: 0,
-                callCount: 0,
-              };
-
-              DISPOSITIONS.forEach(
-                (d) => {
+                // Initialize agent
+                if (
+                  !agentSummary[
+                    agent
+                  ]
+                ) {
                   agentSummary[
                     agent
-                  ][d] = 0;
+                  ] = {
+                    total: 0,
+                  };
+
+                  DISPOSITIONS.forEach(
+                    (d) => {
+                      agentSummary[
+                        agent
+                      ][d] = 0;
+                    }
+                  );
                 }
-              );
+
+                // Update stats
+                agentSummary[
+                  agent
+                ].total++;
+
+                agentSummary[
+                  agent
+                ][
+                  disposition
+                ] =
+                  (agentSummary[
+                    agent
+                  ][
+                    disposition
+                  ] || 0) +
+                  1;
+              } catch (
+                err
+              ) {
+                console.error(
+                  "Row Error:",
+                  err
+                );
+              }
             }
-
-            // update stats
-            agentSummary[
-              agent
-            ].total++;
-
-            agentSummary[
-              agent
-            ][disposition] =
-              (agentSummary[
-                agent
-              ][disposition] ||
-                0) + 1;
-
-            agentSummary[
-              agent
-            ].talkTimeTotal +=
-              talkTimeSec;
-
-            agentSummary[
-              agent
-            ].callCount += 1;
-          })
-          .on("end", resolve)
-          .on("error", reject);
+          )
+          .on(
+            "end",
+            resolve
+          )
+          .on(
+            "error",
+            reject
+          );
       }
     );
 
     // =========================
-    // FINAL RESPONSE
+    // Overall Summary
     // =========================
-
-    // overall totals
-    const overallSummary = {
-      total: 0,
-      talkTimeTotal: 0,
-      callCount: 0,
-    };
+    const overallSummary =
+      {
+        total: 0,
+      };
 
     DISPOSITIONS.forEach(
       (d) => {
@@ -282,32 +232,32 @@ module.exports = async (
       }
     );
 
-    // agent response
+    // =========================
+    // Agent Response
+    // =========================
     const agents =
       Object.keys(
         agentSummary
       ).map((agent) => {
         const data =
-          agentSummary[agent];
+          agentSummary[
+            agent
+          ];
 
-        // add to overall
+        // Add to overall
         overallSummary.total +=
           data.total;
 
-        overallSummary.talkTimeTotal +=
-          data.talkTimeTotal;
-
-        overallSummary.callCount +=
-          data.callCount;
-
         DISPOSITIONS.forEach(
           (d) => {
-            overallSummary[d] +=
+            overallSummary[
+              d
+            ] +=
               data[d] || 0;
           }
         );
 
-        // agent %
+        // Percentages
         const dispositionPercentages =
           {};
 
@@ -316,13 +266,18 @@ module.exports = async (
             dispositionPercentages[
               `${d}Percentage`
             ] =
-              data.total > 0
+              data.total >
+              0
                 ? Number(
                     (
-                      (data[d] /
+                      (data[
+                        d
+                      ] /
                         data.total) *
                       100
-                    ).toFixed(2)
+                    ).toFixed(
+                      2
+                    )
                   )
                 : 0;
           }
@@ -332,20 +287,12 @@ module.exports = async (
           agent,
           ...data,
           ...dispositionPercentages,
-
-          avgTalkTime:
-            data.callCount > 0
-              ? Number(
-                  (
-                    data.talkTimeTotal /
-                    data.callCount
-                  ).toFixed(2)
-                )
-              : 0,
         };
       });
 
-    // overall %
+    // =========================
+    // Overall Percentages
+    // =========================
     const overallPercentages =
       {};
 
@@ -369,33 +316,29 @@ module.exports = async (
       }
     );
 
-    // sort agents
+    // =========================
+    // Sort Agents
+    // =========================
     const sortedAgents =
       agents.sort(
         (a, b) =>
-          b.total - a.total
+          b.total -
+          a.total
       );
 
-    // final response
-    res.json({
-      agents: sortedAgents,
+    // =========================
+    // Final Response
+    // =========================
+    return res.json({
+      agents:
+        sortedAgents,
 
       overall: {
-        agent: "Overall",
+        agent:
+          "Overall",
 
         ...overallSummary,
         ...overallPercentages,
-
-        avgTalkTime:
-          overallSummary.callCount >
-          0
-            ? Number(
-                (
-                  overallSummary.talkTimeTotal /
-                  overallSummary.callCount
-                ).toFixed(2)
-              )
-            : 0,
 
         overallTotalCalls:
           overallSummary.total,
@@ -407,10 +350,13 @@ module.exports = async (
       error
     );
 
-    res.status(500).json({
-      message:
-        "Server error",
-      error: error.message,
-    });
+    return res
+      .status(500)
+      .json({
+        message:
+          "Server error",
+        error:
+          error.message,
+      });
   }
 };
