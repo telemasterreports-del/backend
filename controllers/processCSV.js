@@ -1,6 +1,6 @@
 const csv = require("csv-parser");
-const { PassThrough } = require("stream");
-const s3 = require("../config/s3");
+const fs = require("fs");
+const path = require("path");
 const areaCodeMap = require("../utils/areaCodeMap.json");
 
 // =====================
@@ -196,29 +196,52 @@ module.exports = async (req, res) => {
     );
 
     // support all upload formats
-    const fileKey =
-      req.file?.key ||
-      req.files?.file?.[0]?.key ||
-      req.files?.cdrFile?.[0]?.key;
+    const uploadedFilePath =
+      req.file?.path ||
+      req.files?.file?.[0]?.path ||
+      req.files?.cdrFile?.[0]?.path;
 
     const originalFileName =
       req.file?.originalname ||
-      req.files?.file?.[0]
-        ?.originalname ||
+      req.files?.file?.[0]?.originalname ||
       "uploaded.csv";
 
-    if (!fileKey) {
+    const selectedZone = (
+      req.body?.timezone || "ALL"
+    )
+      .toString()
+      .trim()
+      .toUpperCase();
+
+    if (!uploadedFilePath) {
       return res.status(400).json({
         success: false,
         message: "No file uploaded",
       });
     }
 
-    console.log("📂 FILE:", fileKey);
+    console.log("📂 FILE:", uploadedFilePath);
+    console.log("🎯 Selected timezone:", selectedZone);
 
     // request-scoped storage
     const writers = {};
     const counts = {};
+
+    const allowedZones = new Set([
+      "ALL",
+      "EST",
+      "CST",
+      "MST",
+      "PST",
+    ]);
+
+    if (!allowedZones.has(selectedZone)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid timezone selected",
+      });
+    }
 
     // =====================
     // CREATE WRITER
@@ -231,28 +254,25 @@ module.exports = async (req, res) => {
         return;
       }
 
-      const pass = new PassThrough();
-
       const fileName = `${zone}_${Date.now()}.csv`;
-
-      // write fixed headers
-      pass.write(
-        OUTPUT_HEADERS.join(",") + "\n"
+      const filePath = path.join(
+        __dirname,
+        "..",
+        "outputs",
+        fileName
       );
 
-      writers[zone] = {
-        stream: pass,
-        fileName,
+      fs.mkdirSync(path.dirname(filePath), {
+        recursive: true,
+      });
 
-        uploadPromise: s3
-          .upload({
-            Bucket:
-              process.env.S3_BUCKET_NAME,
-            Key: fileName,
-            Body: pass,
-            ContentType: "text/csv",
-          })
-          .promise(),
+      const stream = fs.createWriteStream(filePath);
+      stream.write(OUTPUT_HEADERS.join(",") + "\n");
+
+      writers[zone] = {
+        stream,
+        fileName,
+        filePath,
       };
 
       counts[zone] = 0;
@@ -263,19 +283,12 @@ module.exports = async (req, res) => {
     };
 
     // =====================
-    // READ CSV FROM S3
+    // READ CSV FROM LOCAL FILE
     // =====================
 
-    const stream = s3
-      .getObject({
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: fileKey,
-      })
-      .createReadStream();
-
-    stream
+    const stream = fs
+      .createReadStream(uploadedFilePath)
       .pipe(csv())
-
       .on("data", (row) => {
         try {
           // detect phone dynamically
@@ -293,6 +306,13 @@ module.exports = async (req, res) => {
           }
 
           const zone = getZone(phone);
+
+          if (
+            selectedZone !== "ALL" &&
+            zone !== selectedZone
+          ) {
+            return;
+          }
 
           createWriterIfNotExists(
             zone
@@ -345,35 +365,15 @@ module.exports = async (req, res) => {
             }
           );
 
-          // wait for uploads
-          const files = await Promise.all(
-            Object.entries(writers).map(
-              async ([zone, writer]) => {
-                await writer.uploadPromise;
-
-                const signedUrl =
-                  s3.getSignedUrl(
-                    "getObject",
-                    {
-                      Bucket:
-                        process.env
-                          .S3_BUCKET_NAME,
-                      Key: writer.fileName,
-                      Expires:
-                        60 * 60,
-                    }
-                  );
-
-                return {
-                  zone,
-                  fileName:
-                    writer.fileName,
-                  url: signedUrl,
-                  count:
-                    counts[zone] || 0,
-                };
-              }
-            )
+          const files = Object.entries(writers).map(
+            ([zone, writer]) => {
+              return {
+                zone,
+                fileName: writer.fileName,
+                url: `${req.protocol}://${req.get("host")}/outputs/${writer.fileName}`,
+                count: counts[zone] || 0,
+              };
+            }
           );
 
           return res.json({
@@ -409,7 +409,7 @@ module.exports = async (req, res) => {
         return res.status(500).json({
           success: false,
           message:
-            "Error reading CSV from S3",
+            "Error reading CSV from file",
           error: err.message,
         });
       });

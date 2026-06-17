@@ -1,5 +1,5 @@
 const csv = require("csv-parser");
-const s3 = require("../config/s3");
+const fs = require("fs");
 
 // ====================================
 // Normalize Disposition
@@ -73,19 +73,10 @@ const DISPOSITIONS = [
 ];
 
 // ====================================
-// S3 Stream Helper
+// Local file stream helper
 // ====================================
-const getS3Stream = (
-  key
-) => {
-  return s3
-    .getObject({
-      Bucket:
-        process.env
-          .S3_BUCKET_NAME,
-      Key: key,
-    })
-    .createReadStream();
+const getLocalStream = (filePath) => {
+  return fs.createReadStream(filePath);
 };
 
 // ====================================
@@ -108,9 +99,9 @@ module.exports = async (
       });
     }
 
-    const agentKey =
+    const agentPath =
       req.files.agentFile[0]
-        .key;
+        .path;
 
     const agentSummary =
       {};
@@ -123,8 +114,8 @@ module.exports = async (
         resolve,
         reject
       ) => {
-        getS3Stream(
-          agentKey
+        getLocalStream(
+          agentPath
         )
           .pipe(csv())
           .on(

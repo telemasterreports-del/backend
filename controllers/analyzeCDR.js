@@ -1,14 +1,14 @@
 const csv = require("csv-parser");
-const s3 = require("../config/s3");
+const fs = require("fs");
 
 module.exports = (req, res) => {
   // support single + multiple upload formats
-  const fileKey =
-    req.file?.key ||
-    req.files?.file?.[0]?.key ||
-    req.files?.cdrFile?.[0]?.key;
+  const filePath =
+    req.file?.path ||
+    req.files?.file?.[0]?.path ||
+    req.files?.cdrFile?.[0]?.path;
 
-  if (!fileKey) {
+  if (!filePath) {
     return res
       .status(400)
       .json({ message: "No file uploaded" });
@@ -28,14 +28,8 @@ module.exports = (req, res) => {
     "Network Congestion",
   ];
 
-  const stream = s3
-    .getObject({
-      Bucket: process.env.S3_BUCKET_NAME,
-      Key: fileKey,
-    })
-    .createReadStream();
-
-  stream
+  const stream = fs
+    .createReadStream(filePath)
     .pipe(csv())
     .on("data", (row) => {
       try {

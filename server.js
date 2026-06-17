@@ -30,9 +30,9 @@ app.get("/", (req, res) => {
   res.json({ message: "API working 🚀" });
 });
 
-app.post("/upload", upload.single("file"), processCSV);
+app.post("/api/upload", upload.single("file"), processCSV);
 app.post(
-  "/analyze",
+  "/api/analyze",
   upload.single("file"),   // 🔥 THIS WAS MISSING
   (req, res, next) => {
     console.log("🔥 ANALYZE ROUTE HIT");
@@ -40,11 +40,11 @@ app.post(
   },
   require("./controllers/analyzeCDR")
 );
-app.post("/agent-report", upload.fields([{ name: "cdrFile", maxCount: 1 }, { name: "agentFile", maxCount: 1 }]), require("./controllers/agentRep"));
+app.post("/api/agent-report", upload.fields([{ name: "cdrFile", maxCount: 1 }, { name: "agentFile", maxCount: 1 }]), require("./controllers/agentRep"));
 
 // ✅ Server start
-const PORT = 80;
-app.listen(PORT,"0.0.0.0", () => {
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
 
