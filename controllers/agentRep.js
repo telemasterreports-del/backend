@@ -2,19 +2,89 @@ const csv = require("csv-parser");
 const fs = require("fs");
 
 // ====================================
+// Header helpers
+// ====================================
+const normalizeHeader = (value) =>
+  String(value || "")
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ");
+
+const getValue = (row, aliases) => {
+  for (const alias of aliases) {
+    const value = row[normalizeHeader(alias)];
+
+    if (value !== undefined) {
+      return value;
+    }
+  }
+
+  return undefined;
+};
+
+const HEADER_ALIASES = {
+  agent: [
+    "Agent Name",
+    "Agent",
+    "Agent Full Name",
+    "User",
+    "User Name",
+  ],
+  disposition: [
+    "Disposition",
+    "Dialer Disposition",
+    "Sub Disposition",
+    "Call Disposition",
+    "Status",
+  ],
+  callType: [
+    "Call Type",
+    "CallType",
+    "Type",
+    "Direction",
+  ],
+};
+
+const isOutboundCall = (value) => {
+  const callType = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    callType === "ob" ||
+    callType === "outbound" ||
+    callType.startsWith("ob ")
+  );
+};
+
+const hasAnyHeader = (
+  headers,
+  aliases
+) =>
+  aliases.some((alias) =>
+    headers.includes(
+      normalizeHeader(alias)
+    )
+  );
+
+// ====================================
 // Normalize Disposition
 // ====================================
 const normalizeDisposition = (
   value
 ) => {
+  const text = String(
+    value || ""
+  ).trim();
+
   if (
-    !value ||
-    value.trim() === ""
+    text === ""
   ) {
     return "Blank";
   }
 
-  const v = value
+  const v = text
     .toLowerCase()
     .trim();
 
@@ -114,34 +184,113 @@ module.exports = async (
         resolve,
         reject
       ) => {
-        getLocalStream(
-          agentPath
-        )
-          .pipe(csv())
+        const parser = csv({
+          mapHeaders: ({
+            header,
+          }) =>
+            normalizeHeader(
+              header
+            ),
+        });
+
+        const stream =
+          getLocalStream(
+            agentPath
+          ).pipe(parser);
+
+        stream
+          .on(
+            "headers",
+            (headers) => {
+              const missing =
+                [];
+
+              if (
+                !hasAnyHeader(
+                  headers,
+                  HEADER_ALIASES
+                    .agent
+                )
+              ) {
+                missing.push(
+                  "Agent Name"
+                );
+              }
+
+              if (
+                !hasAnyHeader(
+                  headers,
+                  HEADER_ALIASES
+                    .disposition
+                )
+              ) {
+                missing.push(
+                  "Disposition"
+                );
+              }
+
+              if (
+                !hasAnyHeader(
+                  headers,
+                  HEADER_ALIASES
+                    .callType
+                )
+              ) {
+                missing.push(
+                  "Call Type"
+                );
+              }
+
+              if (
+                missing.length
+              ) {
+                const error =
+                  new Error(
+                    `Missing required CSV header(s): ${missing.join(
+                      ", "
+                    )}`
+                  );
+
+                error.statusCode = 400;
+                parser.destroy(
+                  error
+                );
+              }
+            }
+          )
           .on(
             "data",
             (row) => {
               try {
                 const agent =
-                  row[
-                    "Agent Name"
-                  ]?.trim() ||
+                  String(
+                    getValue(
+                      row,
+                      HEADER_ALIASES
+                        .agent
+                    ) || ""
+                  ).trim() ||
                   "Unknown Agent";
 
                 const rawDisposition =
-                  row[
-                    "Disposition"
-                  ];
+                  getValue(
+                    row,
+                    HEADER_ALIASES
+                      .disposition
+                  );
 
                 const callType =
-                  row[
-                    "Call Type"
-                  ]?.trim();
+                  getValue(
+                    row,
+                    HEADER_ALIASES
+                      .callType
+                  );
 
                 // Only outbound calls
                 if (
-                  callType !==
-                  "OB"
+                  !isOutboundCall(
+                    callType
+                  )
                 ) {
                   return;
                 }
@@ -202,10 +351,7 @@ module.exports = async (
             "end",
             resolve
           )
-          .on(
-            "error",
-            reject
-          );
+          .on("error", reject);
       }
     );
 
@@ -336,16 +482,23 @@ module.exports = async (
       },
     });
   } catch (error) {
-    console.error(
-      "ERROR:",
-      error
-    );
+    if (!error.statusCode) {
+      console.error(
+        "ERROR:",
+        error
+      );
+    }
 
     return res
-      .status(500)
+      .status(
+        error.statusCode ||
+          500
+      )
       .json({
         message:
-          "Server error",
+          error.statusCode
+            ? error.message
+            : "Server error",
         error:
           error.message,
       });
