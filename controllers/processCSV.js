@@ -27,6 +27,68 @@ const OUTPUT_HEADERS = [
   "Zone",
 ];
 
+const VALID_ZONES = new Set([
+  "EST",
+  "CST",
+  "MST",
+  "PST",
+  "AKST",
+  "HST",
+]);
+
+const STATE_TO_ZONE = {
+  Alabama: "CST",
+  Alaska: "AKST",
+  Arizona: "MST",
+  Arkansas: "CST",
+  California: "PST",
+  Colorado: "MST",
+  Connecticut: "EST",
+  Delaware: "EST",
+  Florida: "EST",
+  Georgia: "EST",
+  Hawaii: "HST",
+  Idaho: "MST",
+  Illinois: "CST",
+  Indiana: "EST",
+  Iowa: "CST",
+  Kansas: "CST",
+  Kentucky: "EST",
+  Louisiana: "CST",
+  Maine: "EST",
+  Maryland: "EST",
+  Massachusetts: "EST",
+  Michigan: "EST",
+  Minnesota: "CST",
+  Mississippi: "CST",
+  Missouri: "CST",
+  Montana: "MST",
+  Nebraska: "CST",
+  Nevada: "PST",
+  "New Hampshire": "EST",
+  "New Jersey": "EST",
+  "New Mexico": "MST",
+  "New York": "EST",
+  "North Carolina": "EST",
+  "North Dakota": "CST",
+  Ohio: "EST",
+  Oklahoma: "CST",
+  Oregon: "PST",
+  Pennsylvania: "EST",
+  "Rhode Island": "EST",
+  "South Carolina": "EST",
+  "South Dakota": "CST",
+  Tennessee: "CST",
+  Texas: "CST",
+  Utah: "MST",
+  Vermont: "EST",
+  Virginia: "EST",
+  Washington: "PST",
+  "West Virginia": "EST",
+  Wisconsin: "CST",
+  Wyoming: "MST",
+};
+
 // =====================
 // HELPERS
 // =====================
@@ -55,6 +117,67 @@ const getZone = (phone) => {
   const areaCode = cleaned.slice(0, 3);
 
   return areaCodeMap[areaCode] || "UNKNOWN";
+};
+
+const normalizeZone = (zone) => {
+  const value = zone
+    ?.toString()
+    .trim()
+    .toUpperCase();
+
+  if (!value) {
+    return "";
+  }
+
+  if (VALID_ZONES.has(value)) {
+    return value;
+  }
+
+  return "";
+};
+
+const getZoneFromState = (state, zipStateLookup) => {
+  const stateValue = state
+    ?.toString()
+    .trim();
+
+  if (!stateValue) {
+    return "";
+  }
+
+  const canonicalState =
+    zipStateLookup.stateAliasToNameMap.get(
+      stateValue.toLowerCase()
+    ) || stateValue;
+
+  return STATE_TO_ZONE[canonicalState] || "";
+};
+
+const getBestZone = (formattedRow, sourceRow, zipStateLookup) => {
+  const phoneZone = getZone(formattedRow.phone);
+
+  if (phoneZone !== "UNKNOWN") {
+    return phoneZone;
+  }
+
+  const existingZone = normalizeZone(
+    findField(sourceRow, ["zone", "timezone", "time zone"])
+  );
+
+  if (existingZone) {
+    return existingZone;
+  }
+
+  const stateZone = getZoneFromState(
+    formattedRow.State,
+    zipStateLookup
+  );
+
+  if (stateZone) {
+    return stateZone;
+  }
+
+  return "UNKNOWN";
 };
 
 // Normalize US ZIP and ZIP+4 values to the five-digit key used by geoData.csv.
@@ -349,6 +472,8 @@ module.exports = async (req, res) => {
       "CST",
       "MST",
       "PST",
+      "AKST",
+      "HST",
       "UNKNOWN",
     ]);
 
@@ -416,7 +541,11 @@ module.exports = async (req, res) => {
           );
 
           // Step 2: assign timezone only after standardization.
-          const zone = getZone(formattedRow.phone);
+          const zone = getBestZone(
+            formattedRow,
+            row,
+            zipStateLookup
+          );
           formattedRow.Zone = zone;
 
           if (
