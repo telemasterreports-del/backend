@@ -11,12 +11,16 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const connectDB = require("./config/db");
 
 const app = express();
 
 const upload = require("./middleware/upload");
 const processCSV = require("./controllers/processCSV");
 const analyzeCDR = require("./controllers/analyzeCDR");
+const jobsController = require("./controllers/jobs");
+
+connectDB();
 
 // ✅ Middlewares
 app.use(cors());
@@ -41,6 +45,8 @@ app.post(
   require("./controllers/analyzeCDR")
 );
 app.post("/api/agent-report", upload.fields([{ name: "cdrFile", maxCount: 1 }, { name: "agentFile", maxCount: 1 }]), require("./controllers/agentRep"));
+app.get("/api/jobs", jobsController.listJobs);
+app.get("/api/jobs/:id", jobsController.getJob);
 
 // ✅ Server start
 const PORT = process.env.PORT || 3001;

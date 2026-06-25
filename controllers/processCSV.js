@@ -1,7 +1,9 @@
 const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 const areaCodeMap = require("../utils/areaCodeMap.json");
+const ProcessingJob = require("../models/ProcessingJob");
 
 let zipToStateMapPromise;
 
@@ -88,6 +90,8 @@ const STATE_TO_ZONE = {
   Wisconsin: "CST",
   Wyoming: "MST",
 };
+
+const STATE_NAMES = Object.keys(STATE_TO_ZONE);
 
 // =====================
 // HELPERS
@@ -422,6 +426,100 @@ const convertRowToCSV = (row) => {
   }).join(",");
 };
 
+const isMongoConnected = () => mongoose.connection.readyState === 1;
+
+const createTrackingJob = async ({
+  originalFileName,
+  uploadedFilePath,
+  selectedZone,
+  selectedStates = [],
+}) => {
+  if (!isMongoConnected()) {
+    return null;
+  }
+
+  try {
+    return await ProcessingJob.create({
+      originalFileName,
+      uploadedFilePath,
+      selectedTimezone: selectedZone,
+      selectedStates,
+      status: "processing",
+    });
+  } catch (error) {
+    console.error("Tracking job create failed:", error.message);
+    return null;
+  }
+};
+
+const updateTrackingJob = async (job, update) => {
+  if (!job || !isMongoConnected()) {
+    return;
+  }
+
+  try {
+    await ProcessingJob.findByIdAndUpdate(job._id, update);
+  } catch (error) {
+    console.error("Tracking job update failed:", error.message);
+  }
+};
+
+const parseSelectedStates = (value, zipStateLookup) => {
+  if (!value) {
+    return [];
+  }
+
+  let rawStates = value;
+
+  if (typeof value === "string") {
+    try {
+      rawStates = JSON.parse(value);
+    } catch (error) {
+      rawStates = value.split(",");
+    }
+  }
+
+  if (!Array.isArray(rawStates)) {
+    rawStates = [rawStates];
+  }
+
+  const selected = rawStates
+    .map((state) => state?.toString().trim())
+    .filter(Boolean)
+    .map(
+      (state) =>
+        zipStateLookup.stateAliasToNameMap.get(state.toLowerCase()) ||
+        state
+    )
+    .filter((state) => STATE_NAMES.includes(state));
+
+  return [...new Set(selected)];
+};
+
+const createCsvWriter = (fileKey) => {
+  const safeKey = fileKey.replace(/[^a-z0-9]+/gi, "_");
+  const fileName = `${safeKey}_${Date.now()}.csv`;
+  const filePath = path.join(
+    __dirname,
+    "..",
+    "outputs",
+    fileName
+  );
+
+  fs.mkdirSync(path.dirname(filePath), {
+    recursive: true,
+  });
+
+  const stream = fs.createWriteStream(filePath);
+  stream.write(OUTPUT_HEADERS.join(",") + "\n");
+
+  return {
+    stream,
+    fileName,
+    filePath,
+  };
+};
+
 // =====================
 // CONTROLLER
 // =====================
@@ -458,6 +556,16 @@ module.exports = async (req, res) => {
     }
 
     const zipStateLookup = await getZipToStateMap();
+    const selectedStates = parseSelectedStates(
+      req.body?.states,
+      zipStateLookup
+    );
+    const trackingJob = await createTrackingJob({
+      originalFileName,
+      uploadedFilePath,
+      selectedZone,
+      selectedStates,
+    });
 
     console.log("📂 FILE:", uploadedFilePath);
     console.log("🎯 Selected timezone:", selectedZone);
@@ -465,6 +573,10 @@ module.exports = async (req, res) => {
     // request-scoped storage
     const writers = {};
     const counts = {};
+    const stateWriters = {};
+    const stateCounts = {};
+    let totalInputRows = 0;
+    let totalOutputRows = 0;
 
     const allowedZones = new Set([
       "ALL",
@@ -496,32 +608,24 @@ module.exports = async (req, res) => {
         return;
       }
 
-      const fileName = `${zone}_${Date.now()}.csv`;
-      const filePath = path.join(
-        __dirname,
-        "..",
-        "outputs",
-        fileName
-      );
-
-      fs.mkdirSync(path.dirname(filePath), {
-        recursive: true,
-      });
-
-      const stream = fs.createWriteStream(filePath);
-      stream.write(OUTPUT_HEADERS.join(",") + "\n");
-
-      writers[zone] = {
-        stream,
-        fileName,
-        filePath,
-      };
+      writers[zone] = createCsvWriter(zone);
 
       counts[zone] = 0;
 
       console.log(
         `✅ Writer created for ${zone}`
       );
+    };
+
+    const createStateWriterIfNotExists = (state) => {
+      if (stateWriters[state]) {
+        return;
+      }
+
+      stateWriters[state] = createCsvWriter(`STATE_${state}`);
+      stateCounts[state] = 0;
+
+      console.log(`Writer created for ${state}`);
     };
 
     // =====================
@@ -533,6 +637,8 @@ module.exports = async (req, res) => {
       .pipe(csv())
       .on("data", (row) => {
         try {
+          totalInputRows++;
+
           // Step 1: standardize and enrich the complete row first.
           const formattedRow = mapRowToStandardFormat(
             row,
@@ -567,6 +673,17 @@ module.exports = async (req, res) => {
           );
 
           counts[zone]++;
+          totalOutputRows++;
+
+          if (selectedStates.includes(formattedRow.State)) {
+            createStateWriterIfNotExists(formattedRow.State);
+
+            stateWriters[formattedRow.State].stream.write(
+              convertRowToCSV(formattedRow) + "\n"
+            );
+
+            stateCounts[formattedRow.State]++;
+          }
         } catch (err) {
           console.error(
             "❌ Row error:",
@@ -584,6 +701,14 @@ module.exports = async (req, res) => {
           if (
             Object.keys(writers).length === 0
           ) {
+              await updateTrackingJob(trackingJob, {
+                status: "failed",
+                totalInputRows,
+                totalOutputRows,
+                error: "No rows matched the selected timezone",
+                completedAt: new Date(),
+              });
+
               return res.status(400).json({
                 success: false,
                 message:
@@ -593,7 +718,10 @@ module.exports = async (req, res) => {
 
           // Close every writer and wait until all output is fully flushed.
           await Promise.all(
-            Object.values(writers).map(
+            [
+              ...Object.values(writers),
+              ...Object.values(stateWriters),
+            ].map(
               ({ stream }) =>
                 new Promise((resolve, reject) => {
                   stream.once("finish", resolve);
@@ -614,20 +742,63 @@ module.exports = async (req, res) => {
             }
           );
 
+          const stateFiles = Object.entries(stateWriters).map(
+            ([state, writer]) => {
+              return {
+                state,
+                fileName: writer.fileName,
+                url: `${req.protocol}://${req.get("host")}/outputs/${writer.fileName}`,
+                count: stateCounts[state] || 0,
+              };
+            }
+          );
+
+          await updateTrackingJob(trackingJob, {
+            status: "completed",
+            totalInputRows,
+            totalOutputRows,
+            selectedStates,
+            timezoneOutputs: files.map((file) => ({
+              label: "timezone_split",
+              zone: file.zone,
+              fileName: file.fileName,
+              url: file.url,
+              rowCount: file.count,
+            })),
+            stateExtracts: stateFiles.map((file) => ({
+              label: "state_extract",
+              state: file.state,
+              fileName: file.fileName,
+              url: file.url,
+              rowCount: file.count,
+            })),
+            completedAt: new Date(),
+          });
+
           return res.json({
             success: true,
             message:
               "Files split successfully by timezone",
             summary: counts,
             totalFiles:
-              files.length,
+              files.length + stateFiles.length,
             files,
+            stateSummary: stateCounts,
+            stateFiles,
           });
         } catch (err) {
           console.error(
             "❌ Finalization error:",
             err
           );
+
+          await updateTrackingJob(trackingJob, {
+            status: "failed",
+            totalInputRows,
+            totalOutputRows,
+            error: err.message,
+            completedAt: new Date(),
+          });
 
           return res.status(500).json({
             success: false,
@@ -643,6 +814,14 @@ module.exports = async (req, res) => {
           "❌ CSV stream error:",
           err
         );
+
+        updateTrackingJob(trackingJob, {
+          status: "failed",
+          totalInputRows,
+          totalOutputRows,
+          error: err.message,
+          completedAt: new Date(),
+        });
 
         return res.status(500).json({
           success: false,
@@ -665,3 +844,4 @@ module.exports = async (req, res) => {
     });
   }
 };
+
