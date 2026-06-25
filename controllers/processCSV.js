@@ -576,8 +576,10 @@ module.exports = async (req, res) => {
     const selectedStateCounts = Object.fromEntries(
       selectedStates.map((state) => [state, 0])
     );
+    const seenPhones = new Set();
     let totalInputRows = 0;
     let totalOutputRows = 0;
+    let duplicateRowsRemoved = 0;
 
     const allowedZones = new Set([
       "ALL",
@@ -635,6 +637,15 @@ module.exports = async (req, res) => {
             originalFileName,
             zipStateLookup
           );
+
+          if (formattedRow.phone) {
+            if (seenPhones.has(formattedRow.phone)) {
+              duplicateRowsRemoved++;
+              return;
+            }
+
+            seenPhones.add(formattedRow.phone);
+          }
 
           // Step 2: assign timezone only after standardization.
           const zone = getBestZone(
@@ -696,6 +707,7 @@ module.exports = async (req, res) => {
                 status: "failed",
                 totalInputRows,
                 totalOutputRows,
+                duplicateRowsRemoved,
                 selectedStates,
                 selectedStateCounts,
                 error:
@@ -737,6 +749,7 @@ module.exports = async (req, res) => {
             status: "completed",
             totalInputRows,
             totalOutputRows,
+            duplicateRowsRemoved,
             selectedStates,
             selectedStateCounts,
             timezoneOutputs: files.map((file) => ({
@@ -757,6 +770,7 @@ module.exports = async (req, res) => {
             summary: counts,
             stateSummary: selectedStateCounts,
             selectedStates,
+            duplicateRowsRemoved,
             totalFiles:
               files.length,
             files,

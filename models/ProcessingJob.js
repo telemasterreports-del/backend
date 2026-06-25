@@ -47,6 +47,10 @@ const processingJobSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    duplicateRowsRemoved: {
+      type: Number,
+      default: 0,
+    },
     stateExtracts: {
       type: [fileSchema],
       default: [],
