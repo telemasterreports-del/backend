@@ -573,8 +573,6 @@ module.exports = async (req, res) => {
     // request-scoped storage
     const writers = {};
     const counts = {};
-    const stateWriters = {};
-    const stateCounts = {};
     let totalInputRows = 0;
     let totalOutputRows = 0;
 
@@ -615,17 +613,6 @@ module.exports = async (req, res) => {
       console.log(
         `✅ Writer created for ${zone}`
       );
-    };
-
-    const createStateWriterIfNotExists = (state) => {
-      if (stateWriters[state]) {
-        return;
-      }
-
-      stateWriters[state] = createCsvWriter(`STATE_${state}`);
-      stateCounts[state] = 0;
-
-      console.log(`Writer created for ${state}`);
     };
 
     // =====================
@@ -681,16 +668,6 @@ module.exports = async (req, res) => {
 
           counts[zone]++;
           totalOutputRows++;
-
-          if (selectedStates.includes(formattedRow.State)) {
-            createStateWriterIfNotExists(formattedRow.State);
-
-            stateWriters[formattedRow.State].stream.write(
-              convertRowToCSV(formattedRow) + "\n"
-            );
-
-            stateCounts[formattedRow.State]++;
-          }
         } catch (err) {
           console.error(
             "❌ Row error:",
@@ -725,10 +702,7 @@ module.exports = async (req, res) => {
 
           // Close every writer and wait until all output is fully flushed.
           await Promise.all(
-            [
-              ...Object.values(writers),
-              ...Object.values(stateWriters),
-            ].map(
+            Object.values(writers).map(
               ({ stream }) =>
                 new Promise((resolve, reject) => {
                   stream.once("finish", resolve);
@@ -749,17 +723,6 @@ module.exports = async (req, res) => {
             }
           );
 
-          const stateFiles = Object.entries(stateWriters).map(
-            ([state, writer]) => {
-              return {
-                state,
-                fileName: writer.fileName,
-                url: `${req.protocol}://${req.get("host")}/outputs/${writer.fileName}`,
-                count: stateCounts[state] || 0,
-              };
-            }
-          );
-
           await updateTrackingJob(trackingJob, {
             status: "completed",
             totalInputRows,
@@ -772,13 +735,7 @@ module.exports = async (req, res) => {
               url: file.url,
               rowCount: file.count,
             })),
-            stateExtracts: stateFiles.map((file) => ({
-              label: "state_extract",
-              state: file.state,
-              fileName: file.fileName,
-              url: file.url,
-              rowCount: file.count,
-            })),
+            stateExtracts: [],
             completedAt: new Date(),
           });
 
@@ -788,10 +745,8 @@ module.exports = async (req, res) => {
               "Files split successfully by timezone",
             summary: counts,
             totalFiles:
-              files.length + stateFiles.length,
+              files.length,
             files,
-            stateSummary: stateCounts,
-            stateFiles,
           });
         } catch (err) {
           console.error(
