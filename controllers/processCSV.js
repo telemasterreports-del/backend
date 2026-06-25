@@ -661,6 +661,13 @@ module.exports = async (req, res) => {
             return;
           }
 
+          if (
+            selectedStates.length > 0 &&
+            !selectedStates.includes(formattedRow.State)
+          ) {
+            return;
+          }
+
           createWriterIfNotExists(
             zone
           );
