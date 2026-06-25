@@ -1,54 +1,12 @@
 const csv = require("csv-parser");
 const fs = require("fs");
-const mongoose = require("mongoose");
-const ProcessingJob = require("../models/ProcessingJob");
 
-const isMongoConnected = () => mongoose.connection.readyState === 1;
-
-const createTrackingJob = async ({
-  originalFileName,
-  uploadedFilePath,
-}) => {
-  if (!isMongoConnected()) {
-    return null;
-  }
-
-  try {
-    return await ProcessingJob.create({
-      originalFileName,
-      uploadedFilePath,
-      processType: "cdr_summary",
-      status: "processing",
-    });
-  } catch (error) {
-    console.error("Tracking job create failed:", error.message);
-    return null;
-  }
-};
-
-const updateTrackingJob = async (job, update) => {
-  if (!job || !isMongoConnected()) {
-    return;
-  }
-
-  try {
-    await ProcessingJob.findByIdAndUpdate(job._id, update);
-  } catch (error) {
-    console.error("Tracking job update failed:", error.message);
-  }
-};
-
-module.exports = async (req, res) => {
+module.exports = (req, res) => {
   // support single + multiple upload formats
   const filePath =
     req.file?.path ||
     req.files?.file?.[0]?.path ||
     req.files?.cdrFile?.[0]?.path;
-  const originalFileName =
-    req.file?.originalname ||
-    req.files?.file?.[0]?.originalname ||
-    req.files?.cdrFile?.[0]?.originalname ||
-    "uploaded.csv";
 
   if (!filePath) {
     return res
@@ -56,13 +14,7 @@ module.exports = async (req, res) => {
       .json({ message: "No file uploaded" });
   }
 
-  const trackingJob = await createTrackingJob({
-    originalFileName,
-    uploadedFilePath: filePath,
-  });
-
   const fileMap = {};
-  let totalInputRows = 0;
 
   // All expected dispositions
   const dispositions = [
@@ -81,8 +33,6 @@ module.exports = async (req, res) => {
     .pipe(csv())
     .on("data", (row) => {
       try {
-        totalInputRows++;
-
         const leadId =
           row["Lead ID"];
 
@@ -149,7 +99,7 @@ module.exports = async (req, res) => {
       }
     })
 
-    .on("end", async () => {
+    .on("end", () => {
       try {
         const report =
           Object.entries(
@@ -224,13 +174,6 @@ module.exports = async (req, res) => {
             )
         );
 
-        await updateTrackingJob(trackingJob, {
-          status: "completed",
-          totalInputRows,
-          totalOutputRows: report.length,
-          completedAt: new Date(),
-        });
-
         return res.json({
           message:
             "CDR connectivity generated",
@@ -238,13 +181,6 @@ module.exports = async (req, res) => {
         });
       } catch (err) {
         console.error(err);
-
-        await updateTrackingJob(trackingJob, {
-          status: "failed",
-          totalInputRows,
-          error: err.message,
-          completedAt: new Date(),
-        });
 
         return res
           .status(500)
@@ -257,13 +193,6 @@ module.exports = async (req, res) => {
 
     .on("error", (err) => {
       console.error(err);
-
-      updateTrackingJob(trackingJob, {
-        status: "failed",
-        totalInputRows,
-        error: err.message,
-        completedAt: new Date(),
-      });
 
       return res
         .status(500)

@@ -34,6 +34,11 @@ const processingJobSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    selectedStateCounts: {
+      type: Map,
+      of: Number,
+      default: {},
+    },
     totalInputRows: {
       type: Number,
       default: 0,

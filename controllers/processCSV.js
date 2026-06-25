@@ -573,6 +573,9 @@ module.exports = async (req, res) => {
     // request-scoped storage
     const writers = {};
     const counts = {};
+    const selectedStateCounts = Object.fromEntries(
+      selectedStates.map((state) => [state, 0])
+    );
     let totalInputRows = 0;
     let totalOutputRows = 0;
 
@@ -648,6 +651,10 @@ module.exports = async (req, res) => {
             return;
           }
 
+          if (selectedStates.includes(formattedRow.State)) {
+            selectedStateCounts[formattedRow.State]++;
+          }
+
           if (
             selectedStates.length > 0 &&
             !selectedStates.includes(formattedRow.State)
@@ -689,14 +696,17 @@ module.exports = async (req, res) => {
                 status: "failed",
                 totalInputRows,
                 totalOutputRows,
-                error: "No rows matched the selected timezone",
+                selectedStates,
+                selectedStateCounts,
+                error:
+                  "No rows matched the selected timezone and state filters",
                 completedAt: new Date(),
               });
 
               return res.status(400).json({
                 success: false,
                 message:
-                "No rows matched the selected timezone",
+                "No rows matched the selected timezone and state filters",
               });
           }
 
@@ -728,6 +738,7 @@ module.exports = async (req, res) => {
             totalInputRows,
             totalOutputRows,
             selectedStates,
+            selectedStateCounts,
             timezoneOutputs: files.map((file) => ({
               label: "timezone_split",
               zone: file.zone,
@@ -744,6 +755,8 @@ module.exports = async (req, res) => {
             message:
               "Files split successfully by timezone",
             summary: counts,
+            stateSummary: selectedStateCounts,
+            selectedStates,
             totalFiles:
               files.length,
             files,
