@@ -45,6 +45,12 @@ app.post(
   require("./controllers/analyzeCDR")
 );
 app.post("/api/agent-report", upload.fields([{ name: "cdrFile", maxCount: 1 }, { name: "agentFile", maxCount: 1 }]), require("./controllers/agentRep"));
+app.post(
+  "/api/crm-report",
+  upload.single("file"),
+  require("./controllers/crmReport")
+);
+app.get("/api/lead-history", require("./controllers/leadHistory"));
 app.get("/api/jobs", jobsController.listJobs);
 app.get("/api/jobs/:id", jobsController.getJob);
 
